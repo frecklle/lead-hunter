@@ -1,0 +1,152 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DATABASE_URL")
+}
+
+// ── Search ────────────────────────────────────────────────────────────────────
+// Represents a saved company search configuration defined by the user.
+model Search {
+  id           String       @id @default(cuid())
+  name         String
+  // BizRaport /api/katalog filter parameters stored as JSON
+  criteria     Json?
+  status       SearchStatus @default(DRAFT)
+  resultsCount Int          @default(0)
+  errorMessage String?
+  lastRunAt    DateTime?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  companies    Company[]
+
+  @@map("searches")
+}
+
+enum SearchStatus {
+  DRAFT     // created but never run
+  RUNNING   // currently fetching companies
+  DONE      // last run completed
+  ERROR     // last run failed
+
+  @@map("search_status")
+}
+
+// ── Company ───────────────────────────────────────────────────────────────────
+// Represents a company discovered through a Search via BizRaport API.
+model Company {
+  id               String   @id @default(cuid())
+  krs              String   // KRS number (e.g. 0000391193_)
+  name             String
+  nip              String?  // Tax identification number
+  regon            String?  // Statistical number
+  legalForm        String?  // Forma prawna (np. Sp. z o.o., S.A.)
+  
+  // Financial indicators
+  revenue          Float?   // Przychody całkowite / operacyjne (PLN)
+  netProfit        Float?   // Zysk netto (PLN)
+  ebitda           Float?   // EBITDA (PLN)
+  equity           Float?   // Kapitał własny (PLN)
+  companyValue     Float?   // Wartość firmy średnia (PLN)
+  creditLimit      Float?   // Sugerowany limit kupiecki (PLN)
+  employees        Int?     // Liczba zatrudnionych
+  
+  // Scoring & Risk
+  reliabilityScore Int?     // Wiarygodność płatnicza (1 = najwyższa, 5 = najniższa)
+  riskProbability  Float?   // Ryzyko niewypłacalności / restrukturyzacji 24m (%)
+  score            Int?     // Lead quality score 0–100
+  scoreReason      String?  // Wyjaśnienie scoringu leada
+
+  // PKD & Industry
+  pkd              String?  // Główny kod PKD (np. 62.01.Z)
+  pkdName          String?  // Opis działalności PKD
+
+  // Location & Contact
+  street           String?  // Ulica i nr
+  city             String?  // Miejscowość
+  postalCode       String?  // Kod pocztowy
+  voivodeship      String?  // Województwo
+  website          String?  // Adres www
+  email            String?  // Kontaktowy e-mail
+
+  // Descriptions & Relations
+  description      String?  // Podsumowanie profilu / działalności z BizRaport
+  keyPoints        Json?    // Kluczowe punkty oferty [punkt_kluczowy_1..5]
+  shareholders     Json?    // Struktura własnościowa (udziały %)
+  management       Json?    // Zarząd i reprezentacja
+
+  // Research & Hook Points
+  researchStatus   String   @default("PENDING") // PENDING | RUNNING | COMPLETED | FAILED
+  researchedAt     DateTime?
+  primaryHook      String?  // Najlepszy główny punkt zaczepienia
+  triggers         CompanyTrigger[]
+
+  // Decision makers & Contacts (Contact Finder)
+  contacts         CompanyContact[]
+
+  searchId         String
+  search           Search   @relation(fields: [searchId], references: [id], onDelete: Cascade)
+
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([searchId, krs])
+  @@index([searchId])
+  @@index([score])
+  @@map("companies")
+}
+
+// ── Company Trigger ───────────────────────────────────────────────────────────
+// Reprezentuje "Punkt zaczepienia" odkryty podczas researchu / scrapingu firmy
+// (inwestycje, nowe maszyny, ekspansja, rekrutacje, nowe lokalizacje, LinkedIn, news).
+model CompanyTrigger {
+  id             String    @id @default(cuid())
+  companyId      String
+  company        Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  category       String    // "INWESTYCJE" | "MASZYNY" | "EKSPANSJA" | "REKRUTACJE" | "LOKALIZACJE" | "NEWS" | "LINKEDIN"
+  title          String
+  snippet        String
+  source         String?   // np. "Google News", "Strona firmy", "LinkedIn", "MSiG"
+  sourceUrl      String?
+  publishedAt    DateTime?
+  hookSuggestion String    // Gotowy, konkretny tekst zaczepienia do cold outreach / rozmowy
+  confidence     Int       @default(80) // 0-100
+
+  createdAt      DateTime  @default(now())
+
+  @@index([companyId])
+  @@index([category])
+  @@map("company_triggers")
+}
+
+// ── Company Contact / Decision Maker ──────────────────────────────────────────
+// Reprezentuje osobę decyzyjną znalezioną dla danej firmy (CEO, Właściciel, Dyrektor,
+// osoba odpowiedzialna za dany obszar inwestycji/produkcji/HR/handlu).
+model CompanyContact {
+  id          String   @id @default(cuid())
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  name        String   // Imię i Nazwisko
+  role        String   // Stanowisko (np. "Prezes Zarządu (CEO)", "Dyrektor ds. Inwestycji", "Właściciel")
+  department  String?  // Obszar (np. "Zarząd / CEO", "Inwestycje / Rozwój", "Produkcja / Maszyny", "Handel / Sprzedaż", "HR")
+  email       String?  // Bezpośredni email lub format domeny
+  phone       String?  // Numer telefonu
+  linkedinUrl String?  // Link do profilu LinkedIn lub bezpośrednie wyszukiwanie profilu
+  source      String   // "KRS / BizRaport" | "Strona WWW (scraping)" | "LinkedIn" | "Weryfikacja"
+  sourceUrl   String?  // Strona skąd pobrano kontakt
+  isPrimary   Boolean  @default(false) // Główny decydent (np. CEO / Właściciel)
+  notes       String?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([companyId])
+  @@index([role])
+  @@map("company_contacts")
+}
+
